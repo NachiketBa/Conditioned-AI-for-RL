@@ -1,4 +1,4 @@
-# Trajectory Prediction with CVAE and MI-VAE
+# Trajectory Prediction with RNN informed CVAE and MI-VAE
 
 Two trained models, two testing scripts, one goal: roll out plausible state trajectories from a learned latent space conditioned on state and control input.
 
@@ -17,7 +17,7 @@ Two trained models, two testing scripts, one goal: roll out plausible state traj
 
 ## Models
 
-### CVAE (`stepwise_cvae.pth`)
+### RNN informed CVAE (`stepwise_cvae.pth`)
 
 A conditional variational autoencoder trained to predict next states step by step. The encoder compresses full trajectories (state + control) into a latent code `z`, and the decoder unrolls predictions autoregressively using that code.
 
@@ -26,7 +26,7 @@ A conditional variational autoencoder trained to predict next states step by ste
 - KL annealing over first 300 epochs, max weight 0.05
 - Trained on N real-noise trajectories
 
-### MI-VAE (`stepwise_mivae.pth`)
+###RNN informed MI-VAE (`stepwise_mivae.pth`)
 
 A two-encoder CVAE trained on real (`A`) and simulated (`B`) trajectories simultaneously. The setup splits the latent space into two parts:
 
