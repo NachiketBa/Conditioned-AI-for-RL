@@ -1,0 +1,181 @@
+#This script implements the RNN informed CVAE 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, TensorDataset
+import glob
+import os
+import pandas as pd
+
+# -------------------------------
+
+# -------------------------------
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+torch.manual_seed(42)
+print(f"Using device: {device}")
+
+
+# -------------------------------
+
+# -------------------------------
+def load_and_stack_csv(folder_path, file_pattern):
+    csv_files = sorted(glob.glob(os.path.join(folder_path, file_pattern)))
+    if len(csv_files) == 0:
+        raise FileNotFoundError(f"No files found matching '{file_pattern}'")
+    tensor_list = []
+    for file in csv_files:
+        df = pd.read_csv(file, header=0).astype(float)
+        df = df.iloc[:, 1:]
+        tensor_list.append(torch.tensor(df.values, dtype=torch.float32).T)
+    return torch.stack(tensor_list)
+
+
+A_path = "C:/Users/nubapat/OneDrive - Worcester Polytechnic Institute (wpi.edu)/Documents/Desktop/Journal_2025_work/data_process_real_noise"
+data = load_and_stack_csv(A_path, "*_*_process_noise_real.csv")
+print("Loaded shape [N, 12, T]:", data.shape)
+
+N, D, T = data.shape
+state_dim = 9
+control_dim = 3
+
+states = data[:, :state_dim, :]
+controls = data[:, state_dim:, :]
+
+# -------------------------------
+
+# -------------------------------
+n_train = 200  
+
+states_train = states[:n_train]
+controls_train = controls[:n_train]
+
+state_mean = states_train.mean(dim=(0, 2), keepdim=True)
+state_std = states_train.std(dim=(0, 2), keepdim=True) + 1e-6
+ctrl_mean = controls_train.mean(dim=(0, 2), keepdim=True)
+ctrl_std = controls_train.std(dim=(0, 2), keepdim=True) + 1e-6
+
+states_train_n = (states_train - state_mean) / state_std
+controls_train_n = (controls_train - ctrl_mean) / ctrl_std
+
+dataset = TensorDataset(states_train_n, controls_train_n)
+loader = DataLoader(dataset, batch_size=32, shuffle=True)
+
+# -------------------------------
+
+# -------------------------------
+latent_dim = 32
+hidden_dim = 64
+
+
+class Encoder(nn.Module):
+    def __init__(self, state_dim, control_dim, latent_dim, hidden_dim):
+        super().__init__()
+        self.step_embed = nn.Sequential(
+            nn.Linear(state_dim + control_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+        )
+        self.mu = nn.Linear(hidden_dim, latent_dim)
+        self.logvar = nn.Linear(hidden_dim, latent_dim)
+
+    def forward(self, s, u):
+        B, _, Tlen = s.shape
+        su = torch.cat([s, u], dim=1)
+        su = su.permute(0, 2, 1).reshape(B * Tlen, state_dim + control_dim)
+        h = self.step_embed(su)
+        h = h.reshape(B, Tlen, hidden_dim).mean(dim=1)
+        return self.mu(h), self.logvar(h)
+
+
+# -------------------------------
+# 4️⃣ Decoder
+# -------------------------------
+class Decoder(nn.Module):
+    def __init__(self, latent_dim, state_dim, control_dim, hidden_dim):
+        super().__init__()
+        in_dim = latent_dim + state_dim + control_dim
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, state_dim),
+        )
+
+    def forward(self, z, s_t, u_t):
+        return self.net(torch.cat([z, s_t, u_t], dim=1))
+
+
+def reparameterize(mu, logvar):
+    return mu + torch.exp(0.5 * logvar) * torch.randn_like(mu)
+
+
+encoder = Encoder(state_dim, control_dim, latent_dim, hidden_dim).to(device)
+decoder = Decoder(latent_dim, state_dim, control_dim, hidden_dim).to(device)
+
+optimizer = torch.optim.Adam(
+    list(encoder.parameters()) + list(decoder.parameters()), lr=1e-3
+)
+
+epochs = 1000  
+anneal_till = 300  
+kl_max = 0.05  
+
+
+def kl_weight(epoch, total, k_max):
+    return min(k_max, (epoch / total) * k_max)
+
+
+for epoch in range(epochs):
+    tot_recon = tot_kl = 0.0
+    w = kl_weight(epoch, anneal_till, kl_max)
+
+    encoder.train()
+    decoder.train()
+
+    for s_batch, u_batch in loader:
+        s_batch, u_batch = s_batch.to(device), u_batch.to(device)
+        optimizer.zero_grad()
+
+        mu, logvar = encoder(s_batch, u_batch)
+        z = reparameterize(mu, logvar)
+
+        recon_loss = 0.0
+        for t in range(T - 1):
+            s_t1_pred = decoder(z, s_batch[:, :, t], u_batch[:, :, t])
+            recon_loss += F.mse_loss(s_t1_pred, s_batch[:, :, t + 1])
+
+        recon_loss /= (T - 1)
+        kl_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+
+        loss = recon_loss + w * kl_loss
+
+        loss.backward()
+        optimizer.step()
+
+        tot_recon += recon_loss.item()
+        tot_kl += kl_loss.item()
+
+    if (epoch + 1) % 20 == 0:
+        n = len(loader)
+        print(f"Epoch {epoch + 1:4d} | KL w: {w:.4f} | Recon: {tot_recon / n:.5f} | KL: {tot_kl / n:.5f}")
+
+# -------------------------------
+
+# -------------------------------
+torch.save({
+    "encoder_state_dict": encoder.state_dict(),
+    "decoder_state_dict": decoder.state_dict(),
+    "state_mean": state_mean, "state_std": state_std,
+    "ctrl_mean": ctrl_mean, "ctrl_std": ctrl_std,
+    "state_dim": state_dim, "control_dim": control_dim,
+    "latent_dim": latent_dim, "hidden_dim": hidden_dim, "T": T,
+}, "stepwise_cvae.pth")
