@@ -1,6 +1,6 @@
 # Trajectory Prediction with CVAE and MI-VAE
 
-Two trained models, two testing scripts, one goal: roll out plausible state trajectories from a learned latent space.
+Two trained models, two testing scripts, one goal: roll out plausible state trajectories from a learned latent space conditioned on state and control input.
 
 ---
 
