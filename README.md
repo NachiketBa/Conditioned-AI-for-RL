@@ -8,8 +8,8 @@ Two trained models, two testing scripts, one goal: roll out plausible state traj
 
 | File | Description |
 |---|---|
-| `CVRNN_teacher_forced.py` | Trains the CVRNN on real data |
-| `MIVRNN_teacher_forced.py` | Trains the MIVRNN with shared/unique latent structure |
+| `CVRNN_teacher_forced.py` | Trains the RNN informed CVAE on real data |
+| `MIVRNN_teacher_forced.py` | Trains the RNN informed MIVAE with shared/unique latent structure |
 | `CVRNN_teacher_forced_test.py` | Loads decoder and rolls out trajectory samples |
 | `MIVRNN_teacher_forced_test.py` | Loads decoder specific to real data and rolls out trajectory samples |
 
