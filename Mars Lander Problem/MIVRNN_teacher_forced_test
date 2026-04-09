@@ -1,0 +1,94 @@
+#This script implements the testing code for MIVRNN
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import glob
+import os
+import pandas as pd
+import matplotlib.pyplot as plt
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+checkpoint = torch.load("stepwise_mivae.pth", map_location=device)
+
+state_dim   = checkpoint["state_dim"]    # 9
+control_dim = checkpoint["control_dim"]  # 3
+z1_dim      = checkpoint["z1_dim"]       # 32
+z2_dim      = checkpoint["z2_dim"]       # 32
+hidden_dim  = checkpoint["hidden_dim"]   # 324
+T           = checkpoint["T"]            # 100
+
+A_state_mean = checkpoint["A_state_mean"].to(device)  # [1, 9, 1]
+A_state_std  = checkpoint["A_state_std"].to(device)
+A_ctrl_mean  = checkpoint["A_ctrl_mean"].to(device)   # [1, 3, 1]
+A_ctrl_std   = checkpoint["A_ctrl_std"].to(device)
+
+class Decoder(nn.Module):
+    def __init__(self, z_dim, hidden_dim):
+        super().__init__()
+        in_dim = z_dim + state_dim + control_dim
+        self.fc1    = nn.Linear(in_dim, hidden_dim)
+        self.ln1    = nn.LayerNorm(hidden_dim)
+        self.fc2    = nn.Linear(hidden_dim, hidden_dim)
+        self.ln2    = nn.LayerNorm(hidden_dim)
+        self.fc_out = nn.Linear(hidden_dim, state_dim)
+
+    def forward(self, z, s_t, u_t):
+        h = F.relu(self.ln1(self.fc1(torch.cat([z, s_t, u_t], dim=1))))
+        h = F.relu(self.ln2(self.fc2(h)))
+        return self.fc_out(h)
+
+decoderA = Decoder(z1_dim + z2_dim, hidden_dim).to(device)
+decoderA.load_state_dict(checkpoint["decoderA_state_dict"])
+decoderA.eval()
+
+def load_test_traj(folder_path, file_pattern, idx=300):
+    csv_files = sorted(glob.glob(os.path.join(folder_path, file_pattern)))
+    df = pd.read_csv(csv_files[idx], header=0).astype(float)
+    df = df.iloc[:, 1:]
+    return torch.tensor(df.values, dtype=torch.float32).T.unsqueeze(0)  # [1, 12, T]
+
+A_path = ("C:/Users/nubapat/OneDrive - Worcester Polytechnic Institute (wpi.edu)/Documents/Desktop/Journal_2025_work/data_process_real_noise")
+
+full_data     = load_test_traj(A_path, "*_*_process_noise_real.csv", idx=30)  # [1, 12, T]
+true_states   = full_data[:, :state_dim,   :]   # [1, 9, T]
+true_controls = full_data[:, state_dim:,   :]   # [1, 3, T]
+num_samples = 5
+plt.figure(figsize=(10, 6))
+plt.plot(
+    true_states[0, 1, :].numpy(),
+    true_states[0, 2, :].numpy(),
+    color='black', linewidth=3, label="Ground Truth"
+)
+
+u_seq_norm = (true_controls.to(device) - A_ctrl_mean) / A_ctrl_std  # [1, 3, T]
+
+for i in range(num_samples):
+    with torch.no_grad():
+        z1 = torch.randn(1, z1_dim, device=device)   # [1, 32]
+        z2 = torch.randn(1, z2_dim, device=device)   # [1, 32]
+        z  = torch.cat([z1, z2], dim=1)              # [1, 64]
+        s_t = ((true_states[:, :, 0].to(device) - A_state_mean.squeeze(-1))
+                / A_state_std.squeeze(-1))            # [1, 9]
+
+        generated_states = [true_states[:, :, 0]]   
+
+        for t in range(T - 1):
+            u_t = u_seq_norm[:, :, t]                # [1, 3]  control at t
+            s_t = decoderA(z, s_t, u_t)             # [1, 9]
+            s_t_unnorm = (s_t * A_state_std.squeeze(-1)
+                             + A_state_mean.squeeze(-1))
+            generated_states.append(s_t_unnorm.cpu())
+        pred_traj = torch.cat(generated_states, dim=0).T   # [9, T]
+
+        plt.plot(
+            pred_traj[1, :], pred_traj[2, :],
+            linestyle='--', alpha=0.7, label=f"Sample {i + 1}"
+        )
+
+plt.title("MI-VAE Stepwise Autoregressive Rollout (Real Noise Decoder)")
+plt.xlabel("X Position")
+plt.ylabel("Y Position")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()
